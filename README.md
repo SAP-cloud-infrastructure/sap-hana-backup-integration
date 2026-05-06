@@ -8,7 +8,7 @@
 
 ## About this project
 
-SAP HANA Backint integration for S3-compatible object storage. Implements the Backint API v1.50 to backup, restore, inquire, and delete HANA database backups on CEPH storage.
+SAP HANA Backint integration for S3-compatible object storage. Implements the Backint v1.50 to backup, restore, inquire, and delete HANA database backups on CEPH storage.
 
 ## Overview
 
