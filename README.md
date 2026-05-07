@@ -56,7 +56,7 @@ Examples:
 
 ## Getting Started
 
-### Prerequisites
+### Requirements
 
 - Go 1.26 or later [only for building the binary]
 - An S3-compatible storage bucket with write access (CEPH, AWS S3, MinIO, etc.)
