@@ -1,6 +1,6 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/SAP-cloud-infrastructure/sap-hana-backup-integration)](https://api.reuse.software/info/github.com/SAP-cloud-infrastructure/sap-hana-backup-integration)
 
-# sap-hana-backup-integration
+# hdbbackint | sap-hana-backup-integration
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26%2B-blue)](https://golang.org/)
@@ -8,7 +8,7 @@
 
 ## About this project
 
-SAP HANA Backint integration for S3-compatible object storage. Implements the Backint v1.50 to backup, restore, inquire, and delete HANA database backups on CEPH storage.
+SAP HANA Backint integration for S3-compatible object storage. Implements the Backint v1.50 to backup, restore, inquire, and delete HANA database backups on CEPH storage using S3 protocol.
 
 ## Overview
 
@@ -58,7 +58,7 @@ Examples:
 
 ### Prerequisites
 
-- Go 1.26 or later
+- Go 1.26 or later [only for building the binary]
 - An S3-compatible storage bucket with write access (CEPH, AWS S3, MinIO, etc.)
 - SAP HANA (any version supporting Backint API 1.50)
 
@@ -100,7 +100,6 @@ chmod 600 /usr/sap/<SID>/SYS/global/hdb/opt/hdbbackint.cfg
 | `SCI_bucketName` | Yes | Target S3 bucket name | `hana-backup-bucket` |
 | `SCI_region` | No | S3 region identifier | `eu-de-2` |
 | `SCI_folderName` | No | Top-level folder prefix inside the bucket | `hanavm001` |
-| `SCI_s3ForcePathStyle` | No | Use path-style addressing (required for MinIO) | `true` |
 
 ### Sample Parameter File
 
