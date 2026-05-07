@@ -44,7 +44,7 @@ func main() {
 	}
 	if versionDetail {
 		fmt.Printf("backint %s %s %s\n", BackintVersion, SoftwareName, SoftwareVersion)
-		fmt.Println("SAP HANA Backint for S3-compatible storage (CEPH/SCI). Epoch-millis+random EBID.")
+		fmt.Println("SAP HANA Backint for S3-compatible storage (CEPH/SCI).")
 		os.Exit(0)
 	}
 
