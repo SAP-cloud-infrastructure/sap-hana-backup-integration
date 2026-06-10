@@ -4,11 +4,11 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26%2B-blue)](https://golang.org/)
-[![Backint SDK](https://img.shields.io/badge/Backint%20SDK-1.50-green)](https://me.sap.com/notes/3634779)
+[![Backint SDK](https://img.shields.io/badge/Backint%20SDK-1.50.2-green)](https://me.sap.com/notes/3634779)
 
 ## About this project
 
-SAP HANA Backint integration for S3-compatible object storage. Implements the Backint v1.50 to backup, restore, inquire, and delete HANA database backups on CEPH storage using S3 protocol.
+SAP HANA Backint integration for S3-compatible object storage. Implements the Backint v1.50.2 to backup, restore, inquire, and delete HANA database backups on CEPH/S3 storage.
 
 ## Overview
 
@@ -43,16 +43,24 @@ flowchart TD
 
 ### S3 Object Key Structure
 
+**Default (full HANA path):**
 ```
 [SCI_folderName/]<trimmed-hana-path>/<EBID>.bak
 
-Examples:
-  With folder:    prod/usr/sap/HXE/SYS/global/hdb/backint/SYSTEMDB/HXE_FULL_90_20260409125112_backup_databackup_1_1/1734105678123.bak
-  Without folder: usr/sap/HXE/SYS/global/hdb/backint/SYSTEMDB/HXE_FULL_90_20260409125112_backup_databackup_1_1/1734105678123.bak
+Example:
+  prod/usr/sap/HXE/SYS/global/hdb/backint/SYSTEMDB/HXE_FULL_90_databackup_1_1/1734105678123.bak
+```
+
+**With `shorten_folder_path=true`:**
+```
+[SCI_folderName/]<SID>/<DBNAME>/<file>/<EBID>.bak
+
+Example:
+  prod/HXE/SYSTEMDB/HXE_FULL_90_databackup_1_1/1734105678123.bak
 ```
 
 - **EBID** (External Backup ID): epoch-milliseconds UTC timestamp, generated at backup time.
-- **Trimmed HANA path**: original HANA file path with the leading `/` removed.
+- **SID** is always preserved in the key so multi-system environments remain correctly scoped.
 
 ## Getting Started
 
@@ -90,30 +98,80 @@ Create a parameter file (`hdbbackint.cfg`) and protect it with appropriate file 
 chmod 600 /usr/sap/<SID>/SYS/global/hdb/opt/hdbbackint.cfg
 ```
 
+### Region and Endpoint Auto-detection
+
+`SCI_region` and `SCI_endpoint` must be set together, or omitted together:
+
+| Scenario | Behaviour |
+|----------|-----------|
+| Both set | Used as-is — no metadata call. Use for cross-region or air-gapped deployments. |
+| Both omitted | Auto-detected from the OpenStack instance metadata service (`169.254.169.254`). Standard SCI VM default. |
+| Only one set | Startup error — set both or omit both. |
+
+When auto-detecting, the region is derived from `availability_zone` in the metadata response (e.g. `eu-de-1b` → `eu-de-1`), and the endpoint is built using `SCI_endpoint_template`.
+
 ### Parameter Reference
 
-| Key | Required | Description | Example |
-|-----|----------|-------------|---------|
-| `SCI_endpoint` | Yes | S3-compatible storage endpoint URL | `https://s3.example.com` |
-| `SCI_accessKey` | Yes | S3 access key ID | `Tomato` |
-| `SCI_secretKey` | Yes | S3 secret access key | `Potato` |
-| `SCI_bucketName` | Yes | Target S3 bucket name | `hana-backup-bucket` |
-| `SCI_region` | No | S3 region identifier | `eu-de-2` |
-| `SCI_folderName` | No | Top-level folder prefix inside the bucket | `hanavm001` |
+**Mandatory**
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| `SCI_accessKey` | S3 access key ID | `YOUR_ACCESS_KEY` |
+| `SCI_secretKey` | S3 secret access key | `YOUR_SECRET_KEY` |
+| `SCI_bucketName` | Target S3 bucket name | `hana-backup-bucket` |
+
+**Region / Endpoint (set both or omit both)**
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| `SCI_region` | S3 region identifier | `eu-de-1` |
+| `SCI_endpoint` | S3-compatible storage endpoint URL | `https://s3.eu-de-1.example.com` |
+| `SCI_endpoint_template` | Template used when auto-detecting endpoint from region. `{region}` is replaced at runtime. The default value (`https://s3.{region}.example.com`) is a placeholder — set this to your actual storage provider's URL pattern. | `https://s3.{region}.example.com` |
+
+**Optional**
+
+| Key | Type | Default | Possible Values / Range | Description |
+|-----|------|---------|------------------------|-------------|
+| `SCI_folderName` | string | _(none)_ | Any valid S3 key prefix | Top-level folder prefix inside the bucket. Leading and trailing `/` are stripped automatically. |
+| `SCI_s3ForcePathStyle` | bool | `false` | `true`, `false` | Use path-style S3 URLs (`https://endpoint/bucket/key`). Required for most CEPH RGW deployments. |
+| `shorten_folder_path` | bool | `false` | `true`, `false` | Store objects as `[folder/]<SID>/<DBNAME>/<file>/<EBID>.bak` instead of the full HANA path. |
+| `retries` | int | `3` | `0` – _(no upper limit)_ | Number of retry attempts for failed S3 operations. `0` disables retries. |
+| `log_file` | string | _(none)_ | Absolute file path | Path to the log file. Must be set together with `log_level`; setting only one is a startup error. |
+| `log_level` | string | `info` | `debug`, `info`, `warn`, `error` | Log verbosity. Must be set together with `log_file`. |
+| `log_rotate_frequency` | string | `never` | `never`, `day`, `hour`, `minute` | How often the log file is rotated. Rotated files are renamed to `<log_file>.<timestamp>`. |
+| `tagging` | bool | `false` | `true`, `false` | Enable S3 object tagging. When enabled, `hdbbackint_version` and `db_version` are always applied. |
+| `object_tags` | string | _(none)_ | Comma-separated `key=value` pairs, max 5 | Custom object tags applied when `tagging=true`. Example: `environment=prod,team=dba`. |
+| `upload_part_size` | int | `134217728` | Min: `5242880` (5 MiB), Max: `268435456` (256 MiB) | Multipart upload part size in bytes. Values outside the range are a startup error. |
+| `upload_concurrency` | int | `32` | Min: `1`, Max: `200` | Concurrent part uploads per file (AWS SDK level). Values outside the range are clamped. |
+| `upload_channel_size` | int | `10` | Min: `1`, Max: `32` | Number of files uploaded in parallel (goroutine pool). Values outside the range are clamped. |
+| `sse_enabled` | bool | `false` | `true`, `false` | Enable per-object SSE-KMS encryption on all backup uploads. |
+| `sse_kms_key_id` | string | _(none)_ | KMS key UUID | KMS key UUID to use for SSE-KMS. Required when `sse_enabled=true`; startup fails if missing. |
 
 ### Sample Parameter File
 
 ```ini
 # /usr/sap/PRD/SYS/global/hdb/opt/hdbbackint.cfg
 
-SCI_endpoint=https://s3.example.com
-SCI_region=eu-de-2
 SCI_accessKey=YOUR_ACCESS_KEY
 SCI_secretKey=YOUR_SECRET_KEY
 SCI_bucketName=hana-backup-bucket
 
+# Region and endpoint — omit both for auto-detection on SCI VMs
+# SCI_region=eu-de-1
+# SCI_endpoint=https://s3.eu-de-1.example.com
+
 # Optional
-# SCI_folderName=hanavm001
+# SCI_folderName=hana-backups
+# log_file=/var/log/hdbbackint/hdbbackint.log
+# log_level=info
+# log_rotate_frequency=day
+# retries=3
+# upload_part_size=134217728
+# upload_concurrency=32
+# upload_channel_size=10
+# tagging=false
+# sse_enabled=false
+# sse_kms_key_id=
 ```
 
 ## Usage
@@ -152,10 +210,12 @@ sequenceDiagram
     HANA->>BIN: invoke: -f backup -p init.utl -u DB@SID
     HANA->>BIN: stdin: #PIPE /path/to/backup/file <maxsize>
     BIN->>BIN: Generate EBID (epoch-millis)
-    BIN->>S3: PutObject (multipart) [folder/]<path>/<EBID>.bak
+    BIN->>S3: PutObject (multipart, concurrent) [folder/]<path>/<EBID>.bak
     S3-->>BIN: 200 OK
     BIN->>HANA: stdout: #SAVED "<EBID>" "/path/to/backup/file" <bytes>
 ```
+
+Multiple files are uploaded concurrently (up to `upload_channel_size` parallel goroutines).
 
 #### Restore
 
@@ -197,23 +257,30 @@ Output: #DELETED "<EBID>" "<file>"
 
 ## Logging and Troubleshooting
 
-All operational diagnostic messages are written to **stderr**. SAP HANA captures these automatically in the `backint.log` file for each database tenant.
+Diagnostic messages are written to the file configured via `log_file` and `log_level`. When unset, no log file is created. SAP HANA also captures stderr in its own `backint.log` per tenant.
 
 ```bash
-# View backint logs for a HANA tenant
+# HANA-managed backint log per tenant
 cat /usr/sap/<SID>/HDB<instance>/<hostname>/trace/DB_<tenant>/backint.log
+
+# hdbbackint dedicated log (when log_file is configured)
+tail -f /var/log/hdbbackint/hdbbackint.log
 ```
+
+Log lines include a `[SID][DB_NAME][backup_level]` tag on every line, making it straightforward to correlate entries across concurrent sessions.
 
 Common issues:
 
 | Symptom | Likely Cause |
 |---------|-------------|
-| `#ERROR Failed to load S3 configuration` | Missing or malformed `hdbbackint.cfg` file |
+| `#ERROR failed to load S3 config` | Missing or malformed `hdbbackint.cfg` |
+| `SCI_region and SCI_endpoint auto-detection failed` | Running outside an SCI VM with no instance metadata service; set both explicitly |
+| `SCI_region is set but SCI_endpoint is missing` | Set both together or omit both |
 | `#NOTFOUND` on restore | EBID or path mismatch; object may have been deleted |
 | S3 connection refused | Wrong `SCI_endpoint` or network/firewall issue |
 | `SignatureDoesNotMatch` | Incorrect `SCI_accessKey` or `SCI_secretKey` |
-| Empty list on inquire | `SCI_folderName` mismatch or wrong bucket |
-
+| Empty list on inquire | `SCI_folderName` mismatch, wrong bucket, or `shorten_folder_path` mismatch |
+| `sse_kms_key_id must be set` | `sse_enabled=true` but `sse_kms_key_id` is missing |
 
 ## Support, Feedback, Contributing
 

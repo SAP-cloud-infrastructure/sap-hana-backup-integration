@@ -2,23 +2,59 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // S3Config holds the configuration parameters for connecting to S3.
 type S3Config struct {
-	Endpoint         string
-	AccessKey        string
-	SecretKey        string
-	BucketName       string
-	Region           string
-	FolderName       string // New: Optional top-level folder in the bucket
-	S3ForcePathStyle bool
+	// Mandatory fields — startup fails if any of these are absent.
+	Endpoint   string
+	AccessKey  string
+	SecretKey  string
+	BucketName string
+	Region     string
+
+	// Optional fields — defaults are applied by LoadS3Config when not present.
+	EndpointTemplate  string // template for deriving endpoint from region; default: see defaultEndpointTemplate
+	FolderName        string // top-level folder prefix inside the bucket
+	S3ForcePathStyle  bool   // default: false
+	LogLevel          string // default: "info"
+	LogFile           string // default: "" (stderr)
+	LogRotateFreq     string // default: "never"
+	ShortenFolderPath bool   // default: false
+	Retries           int    // default: 3, min: 0
+	Tagging           bool   // default: false
+	ObjectTags        string // comma-separated key=value custom tags; max 5
+	UploadPartSize    int64  // bytes; default: 134217728 (128 MiB); range: [5 MiB, 256 MiB]
+	UploadConcurrency int    // default: 32; range: [1, 200]
+	UploadChannelSize int    // default: 10; range: [1, 32]
+	SSEEnabled        bool   // default: false; enables per-object SSE-KMS encryption on backup
+	SSEKMSKeyID       string // Barbican secret UUID; required when SSEEnabled=true
 }
 
-// LoadS3Config parses the parameter file.
+// defaultEndpointTemplate is the default template used to derive the S3 endpoint
+// from a region when SCI_endpoint is not set. The placeholder {region} is replaced
+// with the resolved region value. Operators can override this via SCI_endpoint_template
+// in the parameter file to support other S3-compatible storage backends.
+//
+// NOTE: This value is a generic placeholder. Replace it with the actual endpoint
+// template for your S3-compatible storage before building for production use.
+// Example: "https://s3.{region}.your-storage-provider.com"
+const defaultEndpointTemplate = "https://rgw.st1.{region}.cloud.sap"
+
+// LoadS3Config parses the parameter file into an S3Config.
+// SCI_endpoint and SCI_region must be set together or omitted together.
+// When both are absent, they are auto-detected from the instance metadata
+// service (169.254.169.254). Setting only one is a hard startup error.
+// All other mandatory fields (SCI_accessKey, SCI_secretKey, SCI_bucketName) must
+// be present. All optional fields default to safe values when absent.
 func LoadS3Config(filePath string) (*S3Config, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -26,7 +62,14 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 	}
 	defer file.Close()
 
-	config := &S3Config{}
+	// Sentinel values (< 0) distinguish "not provided" from "explicitly zero".
+	cfg := &S3Config{
+		Retries:           -1,
+		UploadPartSize:    -1,
+		UploadConcurrency: -1,
+		UploadChannelSize: -1,
+	}
+
 	scanner := bufio.NewScanner(file)
 	lineNumber := 0
 
@@ -40,7 +83,8 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
-			fmt.Fprintf(os.Stderr, "Warning: malformed line %d in parameter file %s: %s\n", lineNumber, filePath, line)
+			fmt.Fprintf(os.Stderr, "Warning: malformed line %d in parameter file %s: %s\n",
+				lineNumber, filePath, line)
 			continue
 		}
 
@@ -48,20 +92,75 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 		value := strings.TrimSpace(parts[1])
 
 		switch key {
+		// --- mandatory ---
 		case "SCI_endpoint":
-			config.Endpoint = value
+			cfg.Endpoint = value
 		case "SCI_accessKey":
-			config.AccessKey = value
+			cfg.AccessKey = value
 		case "SCI_secretKey":
-			config.SecretKey = value
+			cfg.SecretKey = value
 		case "SCI_bucketName":
-			config.BucketName = value
+			cfg.BucketName = value
 		case "SCI_region":
-			config.Region = value
+			cfg.Region = value
+		case "SCI_endpoint_template":
+			cfg.EndpointTemplate = value
+
+		// --- optional existing ---
 		case "SCI_folderName":
-			config.FolderName = strings.Trim(value, "/")
+			cfg.FolderName = strings.Trim(value, "/")
 		case "SCI_s3ForcePathStyle":
-			config.S3ForcePathStyle = (strings.ToLower(value) == "true")
+			cfg.S3ForcePathStyle = strings.ToLower(value) == "true"
+
+		// --- optional new ---
+		case "log_level":
+			cfg.LogLevel = strings.ToLower(value)
+		case "log_file":
+			cfg.LogFile = value
+		case "log_rotate_frequency":
+			cfg.LogRotateFreq = strings.ToLower(value)
+		case "shorten_folder_path":
+			cfg.ShortenFolderPath = strings.ToLower(value) == "true"
+		case "retries":
+			n, parseErr := strconv.Atoi(value)
+			if parseErr != nil || n < 0 {
+				fmt.Fprintf(os.Stderr, "Warning: invalid retries value %q in %s, using default 3\n",
+					value, filePath)
+			} else {
+				cfg.Retries = n
+			}
+		case "tagging":
+			cfg.Tagging = strings.ToLower(value) == "true"
+		case "object_tags":
+			cfg.ObjectTags = value
+		case "upload_part_size":
+			n, parseErr := strconv.ParseInt(value, 10, 64)
+			if parseErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: invalid upload_part_size value %q in %s, using default\n",
+					value, filePath)
+			} else {
+				cfg.UploadPartSize = n
+			}
+		case "upload_concurrency":
+			n, parseErr := strconv.Atoi(value)
+			if parseErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: invalid upload_concurrency value %q in %s, using default\n",
+					value, filePath)
+			} else {
+				cfg.UploadConcurrency = n
+			}
+		case "upload_channel_size":
+			n, parseErr := strconv.Atoi(value)
+			if parseErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: invalid upload_channel_size value %q in %s, using default\n",
+					value, filePath)
+			} else {
+				cfg.UploadChannelSize = n
+			}
+		case "sse_enabled":
+			cfg.SSEEnabled = strings.ToLower(value) == "true"
+		case "sse_kms_key_id":
+			cfg.SSEKMSKeyID = strings.TrimSpace(value)
 		default:
 			fmt.Fprintf(os.Stderr, "Warning: unknown key '%s' in parameter file %s\n", key, filePath)
 		}
@@ -71,25 +170,150 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 		return nil, fmt.Errorf("error reading parameter file %s: %w", filePath, err)
 	}
 
-	// Validate required fields
-	if config.Endpoint == "" {
-		return nil, fmt.Errorf("SCI_endpoint is not set in parameter file %s", filePath)
-	}
-	if config.AccessKey == "" {
+	// --- Validate mandatory fields ---
+	if cfg.AccessKey == "" {
 		return nil, fmt.Errorf("SCI_accessKey is not set in parameter file %s", filePath)
 	}
-	if config.SecretKey == "" {
+	if cfg.SecretKey == "" {
 		return nil, fmt.Errorf("SCI_secretKey is not set in parameter file %s", filePath)
 	}
-	if config.BucketName == "" {
+	if cfg.BucketName == "" {
 		return nil, fmt.Errorf("SCI_bucketName is not set in parameter file %s", filePath)
 	}
-	if config.Region == "" {
-		fmt.Fprintf(os.Stderr, "Warning: SCI_region is not set in parameter file %s. This might be required by your S3 provider.\n", filePath)
+
+	// --- Validate and resolve SCI_region / SCI_endpoint ---
+	// Rule: both must be set together, or both must be absent.
+	// - Both set    → used as-is (explicit config; cross-region or air-gapped)
+	// - Neither set → both auto-detected from OpenStack instance metadata (standard SCI VM)
+	// - Only one set → hard error; operator must set both or neither
+	if cfg.EndpointTemplate == "" {
+		cfg.EndpointTemplate = defaultEndpointTemplate
 	}
-	if config.FolderName != "" {
-		fmt.Fprintf(os.Stderr, "Info: Using S3 folder prefix: %s\n", config.FolderName)
+	if cfg.Region != "" && cfg.Endpoint != "" {
+		// Both explicitly set — use as-is, no metadata call.
+	} else if cfg.Region == "" && cfg.Endpoint == "" {
+		region, err := detectRegionFromMetadata()
+		if err != nil {
+			return nil, fmt.Errorf("SCI_region and SCI_endpoint are not set in %s, and auto-detection from instance metadata failed: %w", filePath, err)
+		}
+		cfg.Region = region
+		cfg.Endpoint = strings.ReplaceAll(cfg.EndpointTemplate, "{region}", region)
+		fmt.Fprintf(os.Stderr, "Info: SCI_region and SCI_endpoint auto-detected from instance metadata: region=%s endpoint=%s\n", cfg.Region, cfg.Endpoint)
+	} else if cfg.Region != "" && cfg.Endpoint == "" {
+		return nil, fmt.Errorf("SCI_region is set but SCI_endpoint is missing in %s; set both together or omit both for auto-detection", filePath)
+	} else {
+		return nil, fmt.Errorf("SCI_endpoint is set but SCI_region is missing in %s; set both together or omit both for auto-detection", filePath)
 	}
 
-	return config, nil
+	// --- Validate log_file and log_level must be set together ---
+	if cfg.LogFile != "" && cfg.LogLevel == "" {
+		return nil, fmt.Errorf("log_file is set but log_level is missing in %s; set both together", filePath)
+	}
+	if cfg.LogLevel != "" && cfg.LogFile == "" {
+		return nil, fmt.Errorf("log_level is set but log_file is missing in %s; set both together", filePath)
+	}
+
+	// --- Apply defaults for optional fields not provided ---
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
+	if cfg.LogRotateFreq == "" {
+		cfg.LogRotateFreq = "never"
+	}
+	if cfg.Retries < 0 {
+		cfg.Retries = 3
+	}
+	if cfg.UploadPartSize < 0 {
+		cfg.UploadPartSize = 128 * 1024 * 1024 // 128 MiB
+	}
+	if cfg.UploadConcurrency < 0 {
+		cfg.UploadConcurrency = 32
+	}
+	if cfg.UploadChannelSize < 0 {
+		cfg.UploadChannelSize = 10
+	}
+
+	// --- Validate upload_part_size in [5 MiB, 256 MiB] ---
+	const minPartSize int64 = 5 * 1024 * 1024   // 5 MiB
+	const maxPartSize int64 = 256 * 1024 * 1024 // 256 MiB
+	if cfg.UploadPartSize < minPartSize {
+		return nil, fmt.Errorf("upload_part_size %d is below minimum 5242880 (5 MiB)", cfg.UploadPartSize)
+	}
+	if cfg.UploadPartSize > maxPartSize {
+		return nil, fmt.Errorf("upload_part_size %d exceeds maximum 268435456 (256 MiB)", cfg.UploadPartSize)
+	}
+
+	// --- Clamp upload_concurrency to [1, 200] ---
+	if cfg.UploadConcurrency < 1 {
+		cfg.UploadConcurrency = 1
+	} else if cfg.UploadConcurrency > 200 {
+		cfg.UploadConcurrency = 200
+	}
+
+	// --- Clamp upload_channel_size to [1, 32] ---
+	if cfg.UploadChannelSize < 1 {
+		cfg.UploadChannelSize = 1
+	} else if cfg.UploadChannelSize > 32 {
+		cfg.UploadChannelSize = 32
+	}
+
+	// --- Warn if object_tags is set but tagging is disabled ---
+	if !cfg.Tagging && cfg.ObjectTags != "" {
+		fmt.Fprintf(os.Stderr, "Warning: object_tags is set but tagging=false in %s; tags will be ignored\n",
+			filePath)
+	}
+
+	// --- Validate SSE-KMS fields ---
+	if cfg.SSEEnabled && cfg.SSEKMSKeyID == "" {
+		return nil, fmt.Errorf("sse_kms_key_id must be set when sse_enabled=true in %s", filePath)
+	}
+	if !cfg.SSEEnabled && cfg.SSEKMSKeyID != "" {
+		fmt.Fprintf(os.Stderr, "Warning: sse_kms_key_id is set but sse_enabled=false in %s; encryption will not be applied\n",
+			filePath)
+	}
+
+	return cfg, nil
+}
+
+// detectRegionFromMetadata queries the OpenStack instance metadata service and
+// derives the SCI region by stripping the trailing zone letter from availability_zone.
+// Example: availability_zone "eu-de-1b" → region "eu-de-1".
+// A 2-second timeout is used so that non-SCI environments (no metadata service) fail fast.
+func detectRegionFromMetadata() (string, error) {
+	const metadataURL = "http://169.254.169.254/openstack/latest/meta_data.json"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build metadata request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("GET %s: %w", metadataURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET %s returned HTTP %d", metadataURL, resp.StatusCode)
+	}
+
+	var meta struct {
+		AvailabilityZone string `json:"availability_zone"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+		return "", fmt.Errorf("decode metadata JSON: %w", err)
+	}
+	if meta.AvailabilityZone == "" {
+		return "", fmt.Errorf("availability_zone is empty in instance metadata response")
+	}
+
+	// Strip trailing zone letter: "eu-de-1b" → "eu-de-1"
+	region := meta.AvailabilityZone[:len(meta.AvailabilityZone)-1]
+	if region == "" {
+		return "", fmt.Errorf("could not derive region from availability_zone %q", meta.AvailabilityZone)
+	}
+	return region, nil
 }
