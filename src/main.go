@@ -96,7 +96,11 @@ func main() {
 	if parts := strings.SplitN(userIDArg, "@", 2); len(parts) == 2 {
 		sessionSID = parts[1]
 	}
-	sessionTag := fmt.Sprintf("[%s][-][%s] ", sessionSID, backupLevelArg)
+	levelOrOp := strings.ToUpper(functionArg)
+	if backupLevelArg != "" {
+		levelOrOp = backupLevelArg
+	}
+	sessionTag := fmt.Sprintf("[%s][-][%s] ", sessionSID, levelOrOp)
 
 	if userIDArg == "" {
 		log.Warnf("%s-u not specified; HANA usually provides this", sessionTag)
@@ -190,7 +194,7 @@ func main() {
 			break
 		}
 	}
-	sessionTag = fmt.Sprintf("[%s][%s][%s] ", sessionSID, sessionDBName, backupLevelArg)
+	sessionTag = fmt.Sprintf("[%s][%s][%s] ", sessionSID, sessionDBName, levelOrOp)
 
 	// Log input metadata.
 	for _, pi := range parsedInputs {
