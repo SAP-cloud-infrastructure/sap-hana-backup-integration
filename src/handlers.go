@@ -20,23 +20,23 @@ type App struct {
 	userID      string
 	dbBackupID  string
 	numObjects  string
-	backupLevel string
-	tag         string // "[SID][DB_NAME][backup_level] " prefix for all log lines
+	levelOrOp   string
+	tag         string // "[SID][DB_NAME][level_or_op] " prefix for all log lines
 }
 
 // NewApp constructs an App.
 func NewApp(cfg *S3Config, s3 S3Backend, log *Logger, output io.Writer,
-	userID, dbBackupID, numObjects, backupLevel string, tag string) *App {
+	userID, dbBackupID, numObjects, levelOrOp string, tag string) *App {
 	return &App{
-		cfg:         cfg,
-		s3:          s3,
-		log:         log,
-		output:      output,
-		userID:      userID,
-		dbBackupID:  dbBackupID,
-		numObjects:  numObjects,
-		backupLevel: backupLevel,
-		tag:         tag,
+		cfg:        cfg,
+		s3:         s3,
+		log:        log,
+		output:     output,
+		userID:     userID,
+		dbBackupID: dbBackupID,
+		numObjects: numObjects,
+		levelOrOp:  levelOrOp,
+		tag:        tag,
 	}
 }
 
@@ -57,7 +57,7 @@ func (a *App) fileTag(hanaPath string) string {
 			dbName = rest
 		}
 	}
-	return fmt.Sprintf("[%s][%s][%s] ", sid, dbName, a.backupLevel)
+	return fmt.Sprintf("[%s][%s][%s] ", sid, dbName, a.levelOrOp)
 }
 
 // writeOutput writes one Backint protocol line to the output channel.

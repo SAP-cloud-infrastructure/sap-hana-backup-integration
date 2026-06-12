@@ -218,7 +218,7 @@ func main() {
 
 	WriteSoftwareID(out)
 
-	app := NewApp(cfg, s3Client, log, out, userIDArg, dbBackupIDArg, numObjectsArg, backupLevelArg, sessionTag)
+	app := NewApp(cfg, s3Client, log, out, userIDArg, dbBackupIDArg, numObjectsArg, levelOrOp, sessionTag)
 	ctx := context.Background()
 	exitCode := 0
 
