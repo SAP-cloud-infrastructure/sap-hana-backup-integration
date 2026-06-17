@@ -108,7 +108,7 @@ chmod 600 /usr/sap/<SID>/SYS/global/hdb/opt/hdbbackint.cfg
 | Both omitted | Auto-detected from the OpenStack instance metadata service (`169.254.169.254`). Standard SCI VM default. |
 | Only one set | Startup error — set both or omit both. |
 
-When auto-detecting, the region is derived from `availability_zone` in the metadata response (e.g. `us-east-1b` → `us-east-1`), and the endpoint is built using `SCI_endpoint_template`.
+When auto-detecting, the region is derived from `availability_zone` in the metadata response (e.g. `eu-de-1b` → `eu-de-1`), and the endpoint is built using `SCI_endpoint_template`.
 
 ### Parameter Reference
 
@@ -124,8 +124,8 @@ When auto-detecting, the region is derived from `availability_zone` in the metad
 
 | Key | Description | Example |
 |-----|-------------|---------|
-| `SCI_region` | S3 region identifier | `us-east-1` |
-| `SCI_endpoint` | S3-compatible storage endpoint URL | `https://s3.us-east-1.example.com` |
+| `SCI_region` | S3 region identifier | `eu-de-1` |
+| `SCI_endpoint` | S3-compatible storage endpoint URL | `https://s3.eu-de-1.example.com` |
 | `SCI_endpoint_template` | Template used when auto-detecting endpoint from region. `{region}` is replaced at runtime. The default value (`https://s3.{region}.example.com`) is a placeholder — set this to your actual storage provider's URL pattern. | `https://s3.{region}.example.com` |
 
 **Optional**
@@ -157,8 +157,8 @@ SCI_secretKey=YOUR_SECRET_KEY
 SCI_bucketName=hana-backup-bucket
 
 # Region and endpoint — omit both for auto-detection on SCI VMs
-# SCI_region=us-east-1
-# SCI_endpoint=https://s3.us-east-1.example.com
+# SCI_region=eu-de-1
+# SCI_endpoint=https://s3.eu-de-1.example.com
 
 # Optional
 # SCI_folderName=hana-backups
