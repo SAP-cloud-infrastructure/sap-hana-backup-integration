@@ -2,11 +2,12 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +49,26 @@ type S3Config struct {
 // template for your S3-compatible storage before building for production use.
 // Example: "https://s3.{region}.your-storage-provider.com"
 const defaultEndpointTemplate = "https://rgw.st1.{region}.cloud.sap"
+
+// validateEndpointScheme checks that the endpoint uses https.
+// http is allowed only for localhost and 127.0.0.1 (local dev/testing).
+func validateEndpointScheme(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("endpoint %q is not a valid URL: %w", endpoint, err)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" {
+		host := u.Hostname()
+		if host == "localhost" || host == "127.0.0.1" {
+			return nil
+		}
+		return fmt.Errorf("endpoint %q uses http — only https is allowed (http permitted for localhost/127.0.0.1 only)", endpoint)
+	}
+	return fmt.Errorf("endpoint %q has unsupported scheme %q — use https", endpoint, u.Scheme)
+}
 
 // LoadS3Config parses the parameter file into an S3Config.
 // SCI_endpoint and SCI_region must be set together or omitted together.
@@ -189,6 +210,9 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 	if cfg.EndpointTemplate == "" {
 		cfg.EndpointTemplate = defaultEndpointTemplate
 	}
+	if strings.Contains(cfg.EndpointTemplate, "example.com") {
+		return nil, fmt.Errorf("SCI_endpoint_template in %s is still set to the default placeholder; set it to your actual S3-compatible storage endpoint template", filePath)
+	}
 	if cfg.Region != "" && cfg.Endpoint != "" {
 		// Both explicitly set — use as-is, no metadata call.
 	} else if cfg.Region == "" && cfg.Endpoint == "" {
@@ -203,6 +227,9 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 		return nil, fmt.Errorf("SCI_region is set but SCI_endpoint is missing in %s; set both together or omit both for auto-detection", filePath)
 	} else {
 		return nil, fmt.Errorf("SCI_endpoint is set but SCI_region is missing in %s; set both together or omit both for auto-detection", filePath)
+	}
+	if err := validateEndpointScheme(cfg.Endpoint); err != nil {
+		return nil, fmt.Errorf("invalid SCI_endpoint in %s: %w", filePath, err)
 	}
 
 	// --- Validate log_file and log_level must be set together ---
@@ -243,24 +270,33 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 		return nil, fmt.Errorf("upload_part_size %d exceeds maximum 268435456 (256 MiB)", cfg.UploadPartSize)
 	}
 
-	// --- Clamp upload_concurrency to [1, 200] ---
+	// --- Validate upload_concurrency in [1, 200] ---
 	if cfg.UploadConcurrency < 1 {
-		cfg.UploadConcurrency = 1
-	} else if cfg.UploadConcurrency > 200 {
-		cfg.UploadConcurrency = 200
+		return nil, fmt.Errorf("upload_concurrency %d is below minimum 1", cfg.UploadConcurrency)
+	}
+	if cfg.UploadConcurrency > 200 {
+		return nil, fmt.Errorf("upload_concurrency %d exceeds maximum 200", cfg.UploadConcurrency)
 	}
 
-	// --- Clamp upload_channel_size to [1, 32] ---
+	// --- Validate upload_channel_size in [1, 32] ---
 	if cfg.UploadChannelSize < 1 {
-		cfg.UploadChannelSize = 1
-	} else if cfg.UploadChannelSize > 32 {
-		cfg.UploadChannelSize = 32
+		return nil, fmt.Errorf("upload_channel_size %d is below minimum 1", cfg.UploadChannelSize)
+	}
+	if cfg.UploadChannelSize > 32 {
+		return nil, fmt.Errorf("upload_channel_size %d exceeds maximum 32", cfg.UploadChannelSize)
 	}
 
 	// --- Warn if object_tags is set but tagging is disabled ---
 	if !cfg.Tagging && cfg.ObjectTags != "" {
 		fmt.Fprintf(os.Stderr, "Warning: object_tags is set but tagging=false in %s; tags will be ignored\n",
 			filePath)
+	}
+
+	// --- Validate object_tags format and AWS rules ---
+	if cfg.ObjectTags != "" {
+		if err := validateObjectTags(cfg.ObjectTags); err != nil {
+			return nil, fmt.Errorf("%s in %s", err, filePath)
+		}
 	}
 
 	// --- Validate SSE-KMS fields ---
@@ -273,6 +309,49 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// validateObjectTags checks each key=value pair in a comma-separated object_tags
+// string against AWS tag length and character rules.
+func validateObjectTags(objectTags string) error {
+	tagRe := regexp.MustCompile(`^[a-zA-Z0-9 _.:/=+\-@]+$`)
+
+	count := 0
+	for _, pair := range strings.Split(objectTags, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		count++
+		if count > 5 {
+			return fmt.Errorf("object_tags: exceeds maximum of 5 custom tags")
+		}
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) != 2 {
+			return fmt.Errorf("object_tags: malformed entry %q — expected key=value", pair)
+		}
+		k := strings.TrimSpace(kv[0])
+		v := strings.TrimSpace(kv[1])
+		if len(k) == 0 {
+			return fmt.Errorf("object_tags: tag key must not be empty")
+		}
+		if len(k) > 128 {
+			return fmt.Errorf("object_tags: key %q exceeds 128 character limit", k)
+		}
+		if len(v) > 256 {
+			return fmt.Errorf("object_tags: value for key %q exceeds 256 character limit", k)
+		}
+		if strings.HasPrefix(k, "aws:") {
+			return fmt.Errorf("object_tags: key %q uses reserved prefix \"aws:\"", k)
+		}
+		if !tagRe.MatchString(k) {
+			return fmt.Errorf("object_tags: key %q contains invalid characters", k)
+		}
+		if v != "" && !tagRe.MatchString(v) {
+			return fmt.Errorf("object_tags: value for key %q contains invalid characters", k)
+		}
+	}
+	return nil
 }
 
 // logFieldKeys is the set of config keys that control logging behaviour.
@@ -367,6 +446,9 @@ func ApplyInlineOverrides(cfg *S3Config, kvString string, warnf func(string, ...
 		case "tagging":
 			cfg.Tagging = strings.ToLower(value) == "true"
 		case "object_tags":
+			if err := validateObjectTags(value); err != nil {
+				return fmt.Errorf("TOOLOPTION: %w", err)
+			}
 			cfg.ObjectTags = value
 		case "upload_part_size":
 			n, err := strconv.ParseInt(value, 10, 64)
@@ -409,22 +491,32 @@ func ApplyInlineOverrides(cfg *S3Config, kvString string, warnf func(string, ...
 	return nil
 }
 
-// detectRegionFromMetadata queries the OpenStack instance metadata service and
+// regionRe validates that a derived region contains only safe characters
+// before it is embedded in the S3 endpoint URL.
+var regionRe = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+// availZoneRe parses an OpenStack availability_zone of the form "<region>-<zone-letter>".
+// Captures the region in group 1. Rejects multi-letter suffixes and uppercase.
+var availZoneRe = regexp.MustCompile(`^([a-z0-9-]+)-[a-z]$`)
 // derives the SCI region by stripping the trailing zone letter from availability_zone.
 // Example: availability_zone "eu-de-1b" → region "eu-de-1".
 // A 2-second timeout is used so that non-SCI environments (no metadata service) fail fast.
 func detectRegionFromMetadata() (string, error) {
 	const metadataURL = "http://169.254.169.254/openstack/latest/meta_data.json"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return fmt.Errorf("redirect not allowed for metadata fetch")
+		},
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
+	req, err := http.NewRequest(http.MethodGet, metadataURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("build metadata request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("GET %s: %w", metadataURL, err)
 	}
@@ -444,10 +536,14 @@ func detectRegionFromMetadata() (string, error) {
 		return "", fmt.Errorf("availability_zone is empty in instance metadata response")
 	}
 
-	// Strip trailing zone letter: "eu-de-1b" → "eu-de-1"
-	region := meta.AvailabilityZone[:len(meta.AvailabilityZone)-1]
-	if region == "" {
-		return "", fmt.Errorf("could not derive region from availability_zone %q", meta.AvailabilityZone)
+	// Parse "<region>-<zone-letter>" — e.g. "eu-de-1b" → "eu-de-1".
+	m := availZoneRe.FindStringSubmatch(meta.AvailabilityZone)
+	if m == nil {
+		return "", fmt.Errorf("availability_zone %q does not match expected format <region>-<zone-letter>", meta.AvailabilityZone)
+	}
+	region := m[1]
+	if !regionRe.MatchString(region) {
+		return "", fmt.Errorf("derived region %q contains unexpected characters", region)
 	}
 	return region, nil
 }

@@ -11,6 +11,16 @@ import (
 	"strings"
 )
 
+// parseSID extracts the SID from a user flag value.
+// HANA passes either plain "SID" or "DBNAME@SID" per the Backint spec.
+// Returns the SID in both cases.
+func parseSID(userID string) string {
+	if parts := strings.SplitN(userID, "@", 2); len(parts) == 2 {
+		return parts[1]
+	}
+	return userID
+}
+
 func main() {
 	// CLI flags — local variables, no package globals.
 	var (
@@ -92,10 +102,7 @@ func main() {
 
 	// Build session tag for logging: [SID][-][backup_level]
 	// Done immediately after logger init so every subsequent log line carries the tag.
-	sessionSID := userIDArg
-	if parts := strings.SplitN(userIDArg, "@", 2); len(parts) == 2 {
-		sessionSID = parts[1]
-	}
+	sessionSID := parseSID(userIDArg)
 	levelOrOp := strings.ToUpper(functionArg)
 	if backupLevelArg != "" {
 		levelOrOp = backupLevelArg

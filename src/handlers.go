@@ -43,10 +43,7 @@ func NewApp(cfg *S3Config, s3 S3Backend, log *Logger, output io.Writer,
 // fileTag builds a per-file log tag "[SID][DB_NAME][backup_level] " by extracting
 // DB_NAME from the segment after "/backint/" in the HANA path.
 func (a *App) fileTag(hanaPath string) string {
-	sid := a.userID
-	if parts := strings.SplitN(a.userID, "@", 2); len(parts) == 2 {
-		sid = parts[1]
-	}
+	sid := parseSID(a.userID)
 	dbName := "-"
 	const sep = "/backint/"
 	if idx := strings.Index(hanaPath, sep); idx >= 0 {

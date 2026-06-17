@@ -81,7 +81,9 @@ func NewS3Client(cfg *S3Config, log *Logger, dbVersion string, tag string, sid s
 	log.Infof("%sS3 client initialized: endpoint=%s region=%s pathStyle=%t folder=%q retries=%d",
 		tag, cfg.Endpoint, cfg.Region, cfg.S3ForcePathStyle, cfg.FolderName, cfg.Retries)
 	if cfg.SSEEnabled {
-		log.Infof("%sSSE-KMS enabled: kms_key_id=%s", tag, cfg.SSEKMSKeyID)
+		log.Debugf("%sSSE-KMS enabled: kms_key_id=%s", tag, cfg.SSEKMSKeyID)
+	} else {
+		log.Warnf("%sSSE-KMS is disabled — backup objects will not be encrypted at rest", tag)
 	}
 
 	return &S3Client{svc: svc, cfg: cfg, log: log, dbVersion: dbVersion, tag: tag, sid: sid}, nil

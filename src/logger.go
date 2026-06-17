@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -118,6 +119,18 @@ func NewLogger(w io.Writer) *Logger {
 	}
 }
 
+// openLogFile opens a log file for appending, refusing to follow symlinks.
+// Uses Lstat to detect symlinks before open, and O_NOFOLLOW to close the
+// TOCTOU race window between the check and the open syscall.
+func openLogFile(filePath string) (*os.File, error) {
+	if fi, err := os.Lstat(filePath); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("log file %s is a symlink: refusing to open", filePath)
+		}
+	}
+	return os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0640)
+}
+
 // NewFileLogger creates a Logger with full configuration.
 // If filePath is "", logs are written to os.Stderr.
 func NewFileLogger(filePath string, level LogLevel, rotateFreq LogRotateFreq) (*Logger, error) {
@@ -128,10 +141,13 @@ func NewFileLogger(filePath string, level LogLevel, rotateFreq LogRotateFreq) (*
 			rotateFreq: rotateFreq,
 		}, nil
 	}
+	// MkdirAll creates the directory with mode 0750 only if it does not already exist.
+	// If the directory exists, its permissions are not changed — operators must ensure
+	// the log directory is pre-created with mode 0750 (or tighter), owned by <sid>adm.
 	if err := os.MkdirAll(filepath.Dir(filePath), 0750); err != nil {
 		return nil, fmt.Errorf("create log directory %s: %w", filepath.Dir(filePath), err)
 	}
-	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
+	f, err := openLogFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("open log file %s: %w", filePath, err)
 	}
@@ -151,8 +167,12 @@ func (l *Logger) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.curFile != nil {
-		l.curFile.Sync()
-		l.curFile.Close()
+		if err := l.curFile.Sync(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: log file sync failed: %v\n", err)
+		}
+		if err := l.curFile.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: log file close failed: %v\n", err)
+		}
 		l.curFile = nil
 	}
 }
@@ -175,7 +195,7 @@ func (l *Logger) maybeRotate(now time.Time) {
 	// Rename the active file to <filePath>.<oldBucket> before opening a fresh one.
 	_ = os.Rename(l.filePath, l.filePath+"."+l.curBucket)
 
-	f, err := os.OpenFile(l.filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
+	f, err := openLogFile(l.filePath)
 	if err != nil {
 		// Fall back to stderr so logging continues even if rotation fails.
 		l.w = os.Stderr

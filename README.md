@@ -152,8 +152,8 @@ When auto-detecting, the region is derived from `availability_zone` in the metad
 ```ini
 # /usr/sap/PRD/SYS/global/hdb/opt/hdbbackint.cfg
 
-SCI_accessKey=YOUR_ACCESS_KEY
-SCI_secretKey=YOUR_SECRET_KEY
+SCI_accessKey=<YOUR_ACCESS_KEY>
+SCI_secretKey=<YOUR_SECRET_KEY>
 SCI_bucketName=hana-backup-bucket
 
 # Region and endpoint — omit both for auto-detection on SCI VMs
