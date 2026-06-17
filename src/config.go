@@ -275,6 +275,140 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 	return cfg, nil
 }
 
+// logFieldKeys is the set of config keys that control logging behaviour.
+// These are intentionally excluded from inline TOOLOPTION overrides because
+// the logger is already open before input is parsed — changing these mid-run
+// would split the session log across multiple files.
+var logFieldKeys = map[string]bool{
+	"log_file":             true,
+	"log_level":            true,
+	"log_rotate_frequency": true,
+}
+
+// knownConfigKeys is the complete set of keys accepted by the parameter file.
+var knownConfigKeys = map[string]bool{
+	"SCI_endpoint":          true,
+	"SCI_accessKey":         true,
+	"SCI_secretKey":         true,
+	"SCI_bucketName":        true,
+	"SCI_region":            true,
+	"SCI_endpoint_template": true,
+	"SCI_folderName":        true,
+	"SCI_s3ForcePathStyle":  true,
+	"log_level":             true,
+	"log_file":              true,
+	"log_rotate_frequency":  true,
+	"shorten_folder_path":   true,
+	"retries":               true,
+	"tagging":               true,
+	"object_tags":           true,
+	"upload_part_size":      true,
+	"upload_concurrency":    true,
+	"upload_channel_size":   true,
+	"sse_enabled":           true,
+	"sse_kms_key_id":        true,
+}
+
+// ApplyInlineOverrides parses a semicolon-delimited key=value string from a
+// #TOOLOPTION line and applies matching fields onto cfg in-place.
+//
+// Rules:
+//   - Log fields (log_file, log_level, log_rotate_frequency) are warned and skipped.
+//   - Unknown keys are a hard error.
+//   - Value validation failures are a hard error.
+//   - All other fields overwrite the corresponding cfg field directly.
+func ApplyInlineOverrides(cfg *S3Config, kvString string, warnf func(string, ...any)) error {
+	pairs := strings.Split(kvString, ";")
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("TOOLOPTION: malformed key=value pair %q", pair)
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		if !knownConfigKeys[key] {
+			return fmt.Errorf("TOOLOPTION: unknown key %q", key)
+		}
+		if logFieldKeys[key] {
+			warnf("TOOLOPTION: %q is a log field and cannot be overridden at runtime; ignoring", key)
+			continue
+		}
+
+		switch key {
+		case "SCI_endpoint":
+			cfg.Endpoint = value
+		case "SCI_accessKey":
+			cfg.AccessKey = value
+		case "SCI_secretKey":
+			cfg.SecretKey = value
+		case "SCI_bucketName":
+			cfg.BucketName = value
+		case "SCI_region":
+			cfg.Region = value
+		case "SCI_endpoint_template":
+			cfg.EndpointTemplate = value
+		case "SCI_folderName":
+			cfg.FolderName = strings.Trim(value, "/")
+		case "SCI_s3ForcePathStyle":
+			cfg.S3ForcePathStyle = strings.ToLower(value) == "true"
+		case "shorten_folder_path":
+			cfg.ShortenFolderPath = strings.ToLower(value) == "true"
+		case "retries":
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 {
+				return fmt.Errorf("TOOLOPTION: invalid value %q for retries: must be a non-negative integer", value)
+			}
+			cfg.Retries = n
+		case "tagging":
+			cfg.Tagging = strings.ToLower(value) == "true"
+		case "object_tags":
+			cfg.ObjectTags = value
+		case "upload_part_size":
+			n, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return fmt.Errorf("TOOLOPTION: invalid value %q for upload_part_size: must be an integer", value)
+			}
+			const minPartSize int64 = 5 * 1024 * 1024
+			const maxPartSize int64 = 256 * 1024 * 1024
+			if n < minPartSize || n > maxPartSize {
+				return fmt.Errorf("TOOLOPTION: upload_part_size %d out of range [5242880, 268435456]", n)
+			}
+			cfg.UploadPartSize = n
+		case "upload_concurrency":
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 1 || n > 200 {
+				return fmt.Errorf("TOOLOPTION: invalid value %q for upload_concurrency: must be integer in [1, 200]", value)
+			}
+			cfg.UploadConcurrency = n
+		case "upload_channel_size":
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 1 || n > 32 {
+				return fmt.Errorf("TOOLOPTION: invalid value %q for upload_channel_size: must be integer in [1, 32]", value)
+			}
+			cfg.UploadChannelSize = n
+		case "sse_enabled":
+			cfg.SSEEnabled = strings.ToLower(value) == "true"
+		case "sse_kms_key_id":
+			cfg.SSEKMSKeyID = strings.TrimSpace(value)
+		}
+	}
+
+	// Cross-field validation after all pairs are applied.
+	if cfg.SSEEnabled && cfg.SSEKMSKeyID == "" {
+		return fmt.Errorf("TOOLOPTION: sse_kms_key_id must be set when sse_enabled=true")
+	}
+	if !cfg.Tagging && cfg.ObjectTags != "" {
+		warnf("TOOLOPTION: object_tags is set but tagging=false; tags will be ignored")
+	}
+
+	return nil
+}
+
 // detectRegionFromMetadata queries the OpenStack instance metadata service and
 // derives the SCI region by stripping the trailing zone letter from availability_zone.
 // Example: availability_zone "eu-de-1b" → region "eu-de-1".

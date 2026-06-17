@@ -134,48 +134,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Scan for #TOOLOPTION PARAMETER_FILE= override. Last occurrence wins.
-	// If overridden, only the S3 connection parameters are reloaded (bucket, region,
-	// endpoint, credentials, upload tuning, SSE-KMS, tagging, retries).
-	// The already-open log file is intentionally kept — log_file, log_level, and
-	// log_rotate_frequency from the original -p file remain in effect for the entire
-	// process lifetime. This is by design: the log file must be open before input is
-	// parsed (so startup errors are captured), and reopening it mid-run would split
-	// the session log across two files, complicating troubleshooting.
-	for _, pi := range parsedInputs {
-		if !pi.IsToolOption {
-			continue
-		}
-		const pfKey = "PARAMETER_FILE="
-		if strings.HasPrefix(pi.ToolOptionString, pfKey) {
-			val := strings.TrimSpace(strings.TrimPrefix(pi.ToolOptionString, pfKey))
-			if val != "" {
-				log.Infof("%s#TOOLOPTION PARAMETER_FILE override: %s", sessionTag, val)
-				paramFileArg = val
-				overrideCfg, cfgErr := LoadS3Config(paramFileArg)
-				if cfgErr != nil {
-					WriteOutput(out, "#ERROR failed to load overridden S3 config: %v", cfgErr)
-					log.Errorf("%sload overridden S3 config from %s: %v", sessionTag, paramFileArg, cfgErr)
-					os.Exit(1)
-				}
-				cfg = overrideCfg
-			} else {
-				log.Warnf("%s#TOOLOPTION PARAMETER_FILE is empty; keeping -p value", sessionTag)
-			}
-		}
-	}
-
-	// Extract db_version from the #SOFTWAREID line sent by HANA.
-	dbVersion := ""
-	for _, pi := range parsedInputs {
-		if pi.IsSoftwareID && pi.SoftwareIDVersion != "" {
-			dbVersion = pi.SoftwareIDVersion
-		}
-	}
-
 	// Extract DB_NAME from the first file path in the input.
 	// Each hdbbackint invocation is scoped to a single database, so the first
 	// file path's /backint/<DB_NAME>/ segment identifies the database for all lines.
+	// Done here — before TOOLOPTION processing — so that error log lines from
+	// TOOLOPTION validation carry the full [SID][DB_NAME][level] tag rather than
+	// the placeholder [SID][-][level].
 	sessionDBName := "-"
 	const backintSep = "/backint/"
 	for _, pi := range parsedInputs {
@@ -195,6 +159,79 @@ func main() {
 		}
 	}
 	sessionTag = fmt.Sprintf("[%s][%s][%s] ", sessionSID, sessionDBName, levelOrOp)
+
+	// Scan for #TOOLOPTION overrides. Last occurrence wins.
+	//
+	// Two formats are supported:
+	//
+	// Format 1 — PARAMETER_FILE=<path>
+	//   Discards all values from the -p file and reloads from the given file.
+	//   The already-open log file is intentionally kept — log_file, log_level,
+	//   and log_rotate_frequency from the original -p file remain in effect for
+	//   the entire process lifetime. This is by design: the log file must be open
+	//   before input is parsed (so startup errors are captured), and reopening it
+	//   mid-run would split the session log across two files.
+	//
+	// Format 2 — key=value;key=value;...
+	//   Applies the listed key=value pairs on top of the -p values. Log fields are
+	//   warned and skipped. Unknown keys or invalid values are a hard error.
+	for _, pi := range parsedInputs {
+		if !pi.IsToolOption {
+			continue
+		}
+		ts := pi.ToolOptionString
+		if ts == "" {
+			log.Warnf("%s#TOOLOPTION is empty; ignoring", sessionTag)
+			continue
+		}
+
+		const pfKey = "PARAMETER_FILE="
+		if strings.HasPrefix(ts, pfKey) {
+			// Format 1: file override.
+			path := strings.TrimSpace(strings.TrimPrefix(ts, pfKey))
+			if path == "" {
+				WriteOutput(out, "#ERROR #TOOLOPTION PARAMETER_FILE value is empty")
+				log.Errorf("%s#TOOLOPTION PARAMETER_FILE value is empty", sessionTag)
+				os.Exit(1)
+			}
+			if _, statErr := os.Stat(path); statErr != nil {
+				WriteOutput(out, "#ERROR #TOOLOPTION PARAMETER_FILE not accessible: %v", statErr)
+				log.Errorf("%s#TOOLOPTION PARAMETER_FILE not accessible %s: %v", sessionTag, path, statErr)
+				os.Exit(1)
+			}
+			log.Infof("%s#TOOLOPTION PARAMETER_FILE override: %s", sessionTag, path)
+			overrideCfg, cfgErr := LoadS3Config(path)
+			if cfgErr != nil {
+				WriteOutput(out, "#ERROR #TOOLOPTION failed to load PARAMETER_FILE %s: %v", path, cfgErr)
+				log.Errorf("%s#TOOLOPTION load PARAMETER_FILE %s: %v", sessionTag, path, cfgErr)
+				os.Exit(1)
+			}
+			// Preserve log fields from the original -p config since the logger is already open.
+			overrideCfg.LogFile = cfg.LogFile
+			overrideCfg.LogLevel = cfg.LogLevel
+			overrideCfg.LogRotateFreq = cfg.LogRotateFreq
+			cfg = overrideCfg
+		} else {
+			// Format 2: inline key=value overrides.
+			log.Infof("%s#TOOLOPTION inline override: %s", sessionTag, ts)
+			warnf := func(format string, args ...any) {
+				log.Warnf("%s"+format, append([]any{sessionTag}, args...)...)
+			}
+			if applyErr := ApplyInlineOverrides(cfg, ts, warnf); applyErr != nil {
+				WriteOutput(out, "#ERROR %v", applyErr)
+				log.Errorf("%s%v", sessionTag, applyErr)
+				os.Exit(1)
+			}
+		}
+	}
+
+	// Extract db_version from the #SOFTWAREID line sent by HANA.
+	dbVersion := ""
+	for _, pi := range parsedInputs {
+		if pi.IsSoftwareID && pi.SoftwareIDVersion != "" {
+			dbVersion = pi.SoftwareIDVersion
+		}
+	}
 
 	// Log input metadata.
 	for _, pi := range parsedInputs {
