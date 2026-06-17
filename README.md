@@ -108,7 +108,7 @@ chmod 600 /usr/sap/<SID>/SYS/global/hdb/opt/hdbbackint.cfg
 | Both omitted | Auto-detected from the OpenStack instance metadata service (`169.254.169.254`). Standard SCI VM default. |
 | Only one set | Startup error — set both or omit both. |
 
-When auto-detecting, the region is derived from `availability_zone` in the metadata response (e.g. `eu-de-1b` → `eu-de-1`), and the endpoint is built using `SCI_endpoint_template`.
+When auto-detecting, the region is derived from `availability_zone` in the metadata response (e.g. `us-east-1b` → `us-east-1`), and the endpoint is built using `SCI_endpoint_template`.
 
 ### Parameter Reference
 
@@ -124,8 +124,8 @@ When auto-detecting, the region is derived from `availability_zone` in the metad
 
 | Key | Description | Example |
 |-----|-------------|---------|
-| `SCI_region` | S3 region identifier | `eu-de-1` |
-| `SCI_endpoint` | S3-compatible storage endpoint URL | `https://s3.eu-de-1.example.com` |
+| `SCI_region` | S3 region identifier | `us-east-1` |
+| `SCI_endpoint` | S3-compatible storage endpoint URL | `https://s3.us-east-1.example.com` |
 | `SCI_endpoint_template` | Template used when auto-detecting endpoint from region. `{region}` is replaced at runtime. The default value (`https://s3.{region}.example.com`) is a placeholder — set this to your actual storage provider's URL pattern. | `https://s3.{region}.example.com` |
 
 **Optional**
@@ -157,8 +157,8 @@ SCI_secretKey=YOUR_SECRET_KEY
 SCI_bucketName=hana-backup-bucket
 
 # Region and endpoint — omit both for auto-detection on SCI VMs
-# SCI_region=eu-de-1
-# SCI_endpoint=https://s3.eu-de-1.example.com
+# SCI_region=us-east-1
+# SCI_endpoint=https://s3.us-east-1.example.com
 
 # Optional
 # SCI_folderName=hana-backups
@@ -181,6 +181,40 @@ hdbbackint is invoked by SAP HANA automatically. The CLI follows the Backint API
 ```
 hdbbackint -f <function> -p <param_file> -u <user@SID> [options]
 ```
+
+### TOOLOPTION — Runtime Parameter Override
+
+SAP HANA can pass an option string to hdbbackint at runtime via the `TOOLOPTION` clause of the SQL backup command. Two formats are supported:
+
+**Format 1 — Replace the entire parameter file:**
+
+```sql
+BACKUP DATA ALL USING BACKINT ('my-backup') TOOLOPTION 'PARAMETER_FILE=/path/to/override.cfg';
+```
+
+- All parameters are loaded from the specified file (same format as `hdbbackint.cfg`).
+- The file must be accessible and contain all mandatory fields (`SCI_accessKey`, `SCI_secretKey`, `SCI_bucketName`).
+- Log settings (`log_file`, `log_level`, `log_rotate_frequency`) are always taken from the original `-p` file — they cannot be changed at runtime.
+- Backup fails with `#ERROR` if the file is not accessible or fails validation.
+
+**Format 2 — Override individual parameters inline:**
+
+```sql
+BACKUP DATA ALL USING BACKINT ('my-backup') TOOLOPTION 'SCI_folderName=my-folder;tagging=true;object_tags=env=prod';
+```
+
+- Semicolon-separated `key=value` pairs. Keys must match parameter names exactly (case-sensitive).
+- Each valid key overrides the corresponding value from the `-p` file for this backup only.
+- Log fields (`log_file`, `log_level`, `log_rotate_frequency`) are warned and silently ignored.
+- Unknown keys are a hard error (`#ERROR` + backup fails).
+- Invalid values (out of range, wrong type, cross-field violations) are a hard error.
+
+**Notes:**
+- HANA allows only one `TOOLOPTION` clause per SQL backup command.
+- Single quotes must be used in the SQL command (SQL string literal).
+- Maximum option string length: 512 bytes (enforced by HANA).
+
+
 
 ### Flags
 
@@ -281,6 +315,9 @@ Common issues:
 | `SignatureDoesNotMatch` | Incorrect `SCI_accessKey` or `SCI_secretKey` |
 | Empty list on inquire | `SCI_folderName` mismatch, wrong bucket, or `shorten_folder_path` mismatch |
 | `sse_kms_key_id must be set` | `sse_enabled=true` but `sse_kms_key_id` is missing |
+| `#ERROR #TOOLOPTION PARAMETER_FILE not accessible` | File path in `PARAMETER_FILE=` does not exist or is not readable |
+| `#ERROR TOOLOPTION: unknown key` | Key in inline TOOLOPTION string does not match any known parameter name |
+| `#ERROR TOOLOPTION: invalid value` | Value in inline TOOLOPTION string fails validation (out of range, wrong type, or cross-field rule) |
 
 ## Support, Feedback, Contributing
 
