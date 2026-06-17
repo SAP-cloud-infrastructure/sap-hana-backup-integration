@@ -47,7 +47,7 @@ type S3Config struct {
 // NOTE: This value is a generic placeholder. Replace it with the actual endpoint
 // template for your S3-compatible storage before building for production use.
 // Example: "https://s3.{region}.your-storage-provider.com"
-const defaultEndpointTemplate = "https://rgw.st1.{region}.cloud.sap"
+const defaultEndpointTemplate = "https://s3.{region}.example.com"
 
 // LoadS3Config parses the parameter file into an S3Config.
 // SCI_endpoint and SCI_region must be set together or omitted together.
@@ -411,7 +411,7 @@ func ApplyInlineOverrides(cfg *S3Config, kvString string, warnf func(string, ...
 
 // detectRegionFromMetadata queries the OpenStack instance metadata service and
 // derives the SCI region by stripping the trailing zone letter from availability_zone.
-// Example: availability_zone "eu-de-1b" → region "eu-de-1".
+// Example: availability_zone "us-east-1b" → region "us-east-1".
 // A 2-second timeout is used so that non-SCI environments (no metadata service) fail fast.
 func detectRegionFromMetadata() (string, error) {
 	const metadataURL = "http://169.254.169.254/openstack/latest/meta_data.json"
@@ -444,7 +444,7 @@ func detectRegionFromMetadata() (string, error) {
 		return "", fmt.Errorf("availability_zone is empty in instance metadata response")
 	}
 
-	// Strip trailing zone letter: "eu-de-1b" → "eu-de-1"
+	// Strip trailing zone letter: "us-east-1b" → "us-east-1"
 	region := meta.AvailabilityZone[:len(meta.AvailabilityZone)-1]
 	if region == "" {
 		return "", fmt.Errorf("could not derive region from availability_zone %q", meta.AvailabilityZone)
