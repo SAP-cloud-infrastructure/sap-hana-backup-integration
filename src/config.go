@@ -26,7 +26,7 @@ type S3Config struct {
 	EndpointTemplate  string // template for deriving endpoint from region; default: see defaultEndpointTemplate
 	FolderName        string // top-level folder prefix inside the bucket
 	S3ForcePathStyle  bool   // default: false
-	LogLevel          string // default: "info"
+	LogLevel          string // default: "info" (only when LogFile is set; "" when logging to stderr)
 	LogFile           string // default: "" (stderr)
 	LogRotateFreq     string // default: "never"
 	ShortenFolderPath bool   // default: false
