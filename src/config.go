@@ -495,9 +495,10 @@ func ApplyInlineOverrides(cfg *S3Config, kvString string, warnf func(string, ...
 // before it is embedded in the S3 endpoint URL.
 var regionRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
-// availZoneRe parses an OpenStack availability_zone of the form "<region>-<zone-letter>".
-// Captures the region in group 1. Rejects multi-letter suffixes and uppercase.
-var availZoneRe = regexp.MustCompile(`^([a-z0-9-]+)-[a-z]$`)
+// availZoneSuffixRe validates that an OpenStack availability_zone ends with a single
+// lowercase letter zone suffix directly appended to the region digit
+// (e.g. "eu-de-1b" → region "eu-de-1", zone "b"). No separator between region and zone.
+var availZoneSuffixRe = regexp.MustCompile(`[a-z]$`)
 // derives the SCI region by stripping the trailing zone letter from availability_zone.
 // Example: availability_zone "eu-de-1b" → region "eu-de-1".
 // A 2-second timeout is used so that non-SCI environments (no metadata service) fail fast.
@@ -536,12 +537,13 @@ func detectRegionFromMetadata() (string, error) {
 		return "", fmt.Errorf("availability_zone is empty in instance metadata response")
 	}
 
-	// Parse "<region>-<zone-letter>" — e.g. "eu-de-1b" → "eu-de-1".
-	m := availZoneRe.FindStringSubmatch(meta.AvailabilityZone)
-	if m == nil {
-		return "", fmt.Errorf("availability_zone %q does not match expected format <region>-<zone-letter>", meta.AvailabilityZone)
+	// Validate availability_zone ends with a single lowercase letter zone suffix.
+	// Format: <region><zone-letter> e.g. "eu-de-1b" → region "eu-de-1".
+	az := meta.AvailabilityZone
+	if !availZoneSuffixRe.MatchString(az) {
+		return "", fmt.Errorf("availability_zone %q does not match expected format <region><zone-letter>", az)
 	}
-	region := m[1]
+	region := az[:len(az)-1]
 	if !regionRe.MatchString(region) {
 		return "", fmt.Errorf("derived region %q contains unexpected characters", region)
 	}
