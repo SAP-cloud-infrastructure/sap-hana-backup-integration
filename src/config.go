@@ -506,8 +506,12 @@ var availZoneSuffixRe = regexp.MustCompile(`[a-z]$`)
 // Example: availability_zone "eu-de-1b" → region "eu-de-1".
 // A 2-second timeout is used so that non-SCI environments (no metadata service) fail fast.
 func detectRegionFromMetadata() (string, error) {
-	const metadataURL = "http://169.254.169.254/openstack/latest/meta_data.json"
+	return detectRegionFromMetadataURL("http://169.254.169.254/openstack/latest/meta_data.json")
+}
 
+// detectRegionFromMetadataURL is the testable implementation — accepts a URL so tests
+// can point it at an httptest server instead of the real metadata endpoint.
+func detectRegionFromMetadataURL(metadataURL string) (string, error) {
 	client := &http.Client{
 		Timeout: 2 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
