@@ -3,12 +3,12 @@
 # hdbbackint | sap-hana-backup-integration
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.26%2B-blue)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-1.26.4%2B-blue)](https://golang.org/)
 [![Backint SDK](https://img.shields.io/badge/Backint%20SDK-1.50.2-green)](https://me.sap.com/notes/3634779)
 
 ## About this project
 
-SAP HANA Backint integration for S3-compatible object storage. Implements the Backint v1.50.2 to backup, restore, inquire, and delete HANA database backups on CEPH/S3 storage.
+SAP HANA Backint integration for S3-compatible object storage. Implements the Backint API v1.50.2 to backup, restore, inquire, and delete HANA database backups on CEPH/S3 storage.
 
 ## Overview
 
@@ -66,9 +66,9 @@ Example:
 
 ### Requirements
 
-- Go 1.26 or later [only for building the binary]
+- Go 1.26.4 or later [only for building the binary]
 - An S3-compatible storage bucket with write access (CEPH, AWS S3, MinIO, etc.)
-- SAP HANA (any version supporting Backint API 1.50)
+- SAP HANA (any version supporting Backint API 1.50.2)
 
 ### Build
 
@@ -142,8 +142,8 @@ When auto-detecting, the region is derived from `availability_zone` in the metad
 | `tagging` | bool | `false` | `true`, `false` | Enable S3 object tagging. When enabled, `hdbbackint_version` and `db_version` are always applied. |
 | `object_tags` | string | _(none)_ | Comma-separated `key=value` pairs, max 5 | Custom object tags applied when `tagging=true`. Example: `environment=prod,team=dba`. |
 | `upload_part_size` | int | `134217728` | Min: `5242880` (5 MiB), Max: `268435456` (256 MiB) | Multipart upload part size in bytes. Values outside the range are a startup error. |
-| `upload_concurrency` | int | `32` | Min: `1`, Max: `200` | Concurrent part uploads per file (AWS SDK level). Values outside the range are clamped. |
-| `upload_channel_size` | int | `10` | Min: `1`, Max: `32` | Number of files uploaded in parallel (goroutine pool). Values outside the range are clamped. |
+| `upload_concurrency` | int | `32` | Min: `1`, Max: `200` | Concurrent part uploads per file (AWS SDK level). Values outside the range are a startup error. |
+| `upload_channel_size` | int | `10` | Min: `1`, Max: `32` | Number of files uploaded in parallel (goroutine pool). Values outside the range are a startup error. |
 | `sse_enabled` | bool | `false` | `true`, `false` | Enable per-object SSE-KMS encryption on all backup uploads. |
 | `sse_kms_key_id` | string | _(none)_ | KMS key UUID | KMS key UUID to use for SSE-KMS. Required when `sse_enabled=true`; startup fails if missing. |
 
@@ -176,7 +176,7 @@ SCI_bucketName=hana-backup-bucket
 
 ## Usage
 
-hdbbackint is invoked by SAP HANA automatically. The CLI follows the Backint API 1.50 specification.
+hdbbackint is invoked by SAP HANA automatically. The CLI follows the Backint API 1.50.2 specification.
 
 ```
 hdbbackint -f <function> -p <param_file> -u <user@SID> [options]
