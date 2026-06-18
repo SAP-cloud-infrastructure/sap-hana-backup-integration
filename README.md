@@ -110,6 +110,8 @@ chmod 600 /usr/sap/<SID>/SYS/global/hdb/opt/hdbbackint.cfg
 
 When auto-detecting, the region is derived from `availability_zone` in the metadata response (e.g. `eu-de-1b` → `eu-de-1`), and the endpoint is built using `SCI_endpoint_template`.
 
+> **Note for users of the pre-built binary (GitHub Releases):** The distributed binary ships with a generic placeholder for `SCI_endpoint_template`. If you rely on auto-detection (i.e. you do not set `SCI_region` and `SCI_endpoint` explicitly), you must set `SCI_endpoint_template` in your `hdbbackint.cfg` to match your storage provider's URL pattern. If you set `SCI_region` and `SCI_endpoint` explicitly, the template is not used and no action is required.
+
 ### Parameter Reference
 
 **Mandatory**
