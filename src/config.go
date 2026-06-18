@@ -241,7 +241,10 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 	}
 
 	// --- Apply defaults for optional fields not provided ---
-	if cfg.LogLevel == "" {
+	// LogLevel is only defaulted when LogFile is set — when both are empty the
+	// logger writes to stderr and LogLevel remaining "" correctly reflects that
+	// no file logging is configured (avoids misleading LogLevel="info"/LogFile="" state).
+	if cfg.LogLevel == "" && cfg.LogFile != "" {
 		cfg.LogLevel = "info"
 	}
 	if cfg.LogRotateFreq == "" {
