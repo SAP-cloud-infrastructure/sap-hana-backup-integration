@@ -48,7 +48,7 @@ type S3Config struct {
 // NOTE: This value is a generic placeholder. Replace it with the actual endpoint
 // template for your S3-compatible storage before building for production use.
 // Example: "https://s3.{region}.your-storage-provider.com"
-const defaultEndpointTemplate = "https://s3.{region}.example.com"
+const defaultEndpointTemplate = "https://rgw.st1.{region}.cloud.sap"
 
 // validateEndpointScheme checks that the endpoint uses https.
 // http is allowed only for localhost and 127.0.0.1 (local dev/testing).
