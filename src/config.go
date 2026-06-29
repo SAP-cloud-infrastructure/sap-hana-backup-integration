@@ -48,7 +48,7 @@ type S3Config struct {
 // NOTE: This value is a generic placeholder. Replace it with the actual endpoint
 // template for your S3-compatible storage before building for production use.
 // Example: "https://s3.{region}.your-storage-provider.com"
-const defaultEndpointTemplate = "https://rgw.st1.{region}.cloud.sap"
+const defaultEndpointTemplate = "https://s3.{region}.example.com"
 
 // validateEndpointScheme checks that the endpoint uses https.
 // http is allowed only for localhost and 127.0.0.1 (local dev/testing).
@@ -58,6 +58,9 @@ func validateEndpointScheme(endpoint string) error {
 		return fmt.Errorf("endpoint %q is not a valid URL: %w", endpoint, err)
 	}
 	if u.Scheme == "https" {
+		if u.Host == "" {
+			return fmt.Errorf("endpoint %q has no host", endpoint)
+		}
 		return nil
 	}
 	if u.Scheme == "http" {
@@ -210,12 +213,12 @@ func LoadS3Config(filePath string) (*S3Config, error) {
 	if cfg.EndpointTemplate == "" {
 		cfg.EndpointTemplate = defaultEndpointTemplate
 	}
-	if strings.Contains(cfg.EndpointTemplate, "example.com") {
-		return nil, fmt.Errorf("SCI_endpoint_template in %s is still set to the default placeholder; set it to your actual S3-compatible storage endpoint template", filePath)
-	}
 	if cfg.Region != "" && cfg.Endpoint != "" {
 		// Both explicitly set — use as-is, no metadata call.
 	} else if cfg.Region == "" && cfg.Endpoint == "" {
+		if strings.Contains(cfg.EndpointTemplate, "example.com") {
+			return nil, fmt.Errorf("SCI_endpoint_template in %s is still set to the default placeholder; set it to your actual S3-compatible storage endpoint template", filePath)
+		}
 		region, err := detectRegionFromMetadata()
 		if err != nil {
 			return nil, fmt.Errorf("SCI_region and SCI_endpoint are not set in %s, and auto-detection from instance metadata failed: %w", filePath, err)
@@ -501,7 +504,7 @@ var regionRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 // availZoneSuffixRe validates that an OpenStack availability_zone ends with a single
 // lowercase letter zone suffix directly appended to the region digit
 // (e.g. "eu-de-1b" → region "eu-de-1", zone "b"). No separator between region and zone.
-var availZoneSuffixRe = regexp.MustCompile(`[a-z]$`)
+var availZoneSuffixRe = regexp.MustCompile(`^([a-z0-9-]+[0-9])([a-z])$`)
 // derives the SCI region by stripping the trailing zone letter from availability_zone.
 // Example: availability_zone "eu-de-1b" → region "eu-de-1".
 // A 2-second timeout is used so that non-SCI environments (no metadata service) fail fast.

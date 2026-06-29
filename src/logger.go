@@ -193,11 +193,13 @@ func (l *Logger) maybeRotate(now time.Time) {
 		l.curFile = nil
 	}
 	// Rename the active file to <filePath>.<oldBucket> before opening a fresh one.
-	_ = os.Rename(l.filePath, l.filePath+"."+l.curBucket)
+	if err := os.Rename(l.filePath, l.filePath+"."+l.curBucket); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: log rotation rename failed: %v\n", err)
+	}
 
 	f, err := openLogFile(l.filePath)
 	if err != nil {
-		// Fall back to stderr so logging continues even if rotation fails.
+		fmt.Fprintf(os.Stderr, "warning: log rotation reopen failed, falling back to stderr: %v\n", err)
 		l.w = os.Stderr
 		l.curBucket = bucket
 		return

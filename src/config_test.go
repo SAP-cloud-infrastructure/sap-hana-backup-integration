@@ -332,6 +332,7 @@ func TestValidateEndpointScheme(t *testing.T) {
 	}{
 		{"https://s3.us-east-1.example.com", false},
 		{"https://s3.example.com:443", false},
+		{"https:", true},
 		{"http://localhost:9000", false},
 		{"http://127.0.0.1:9000", false},
 		{"http://s3.us-east-1.example.com", true},
@@ -514,7 +515,8 @@ func TestDetectRegionFromMetadata_InvalidZoneFormat(t *testing.T) {
 		wantErr string
 	}{
 		{"eu-de-1", "does not match expected format"},
-		{"EU-DE-1b", "unexpected characters"},
+		{"abc", "does not match expected format"},
+		{"EU-DE-1b", "does not match expected format"},
 		{"", "is empty"},
 	}
 	for _, tt := range tests {

@@ -14,25 +14,30 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26.4'
 
       - name: Run tests
-        run: go test ./src/...
+        run: go test ./...
 
       - name: Build binary
-        run: GOOS=linux GOARCH=amd64 go build -o hdbbackint ./src/
+        run: GOOS=linux GOARCH=amd64 go build -o hdbbackint .
 
       - name: Package release asset
-        run: zip hdbbackint-linux-amd64.zip hdbbackint src/hdbbackint.cfg LICENSE
+        run: zip hdbbackint-linux-amd64.zip hdbbackint hdbbackint.cfg LICENSE
+
+      - name: Generate SHA-256 checksum
+        run: sha256sum hdbbackint-linux-amd64.zip > hdbbackint-linux-amd64.zip.sha256
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           draft: true
           generate_release_notes: true
-          files: hdbbackint-linux-amd64.zip
+          files: |
+            hdbbackint-linux-amd64.zip
+            hdbbackint-linux-amd64.zip.sha256
