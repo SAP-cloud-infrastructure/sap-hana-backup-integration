@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"sync"
 )
 
 // App owns all application state and implements the four Backint operation handlers.
@@ -14,29 +16,52 @@ type App struct {
 	s3          S3Backend
 	log         *Logger
 	output      io.Writer
+	outMu       sync.Mutex // guards concurrent writes to output
 	userID      string
 	dbBackupID  string
 	numObjects  string
-	backupLevel string
+	levelOrOp   string
+	tag         string // "[SID][DB_NAME][level_or_op] " prefix for all log lines
 }
 
 // NewApp constructs an App.
 func NewApp(cfg *S3Config, s3 S3Backend, log *Logger, output io.Writer,
-	userID, dbBackupID, numObjects, backupLevel string) *App {
+	userID, dbBackupID, numObjects, levelOrOp string, tag string) *App {
 	return &App{
-		cfg:         cfg,
-		s3:          s3,
-		log:         log,
-		output:      output,
-		userID:      userID,
-		dbBackupID:  dbBackupID,
-		numObjects:  numObjects,
-		backupLevel: backupLevel,
+		cfg:        cfg,
+		s3:         s3,
+		log:        log,
+		output:     output,
+		userID:     userID,
+		dbBackupID: dbBackupID,
+		numObjects: numObjects,
+		levelOrOp:  levelOrOp,
+		tag:        tag,
 	}
 }
 
+// fileTag builds a per-file log tag "[SID][DB_NAME][backup_level] " by extracting
+// DB_NAME from the segment after "/backint/" in the HANA path.
+func (a *App) fileTag(hanaPath string) string {
+	sid := parseSID(a.userID)
+	dbName := "-"
+	const sep = "/backint/"
+	if idx := strings.Index(hanaPath, sep); idx >= 0 {
+		rest := hanaPath[idx+len(sep):]
+		if slashIdx := strings.Index(rest, "/"); slashIdx >= 0 {
+			dbName = rest[:slashIdx]
+		} else if rest != "" {
+			dbName = rest
+		}
+	}
+	return fmt.Sprintf("[%s][%s][%s] ", sid, dbName, a.levelOrOp)
+}
+
 // writeOutput writes one Backint protocol line to the output channel.
+// It is safe for concurrent use by multiple goroutines.
 func (a *App) writeOutput(format string, args ...any) {
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
 	WriteOutput(a.output, format, args...)
 }
 
@@ -44,60 +69,85 @@ func (a *App) writeOutput(format string, args ...any) {
 // Returns (false, nil) if any individual file operation fails (partial failure),
 // (true, nil) on full success, or (false, err) on a fatal error.
 func (a *App) handleBackup(ctx context.Context, inputs []InputLine) (bool, error) {
-	a.log.Infof("backup start: sessionID=%s numObjects=%s level=%s",
-		a.dbBackupID, a.numObjects, a.backupLevel)
+	a.log.Infof("%sbackup start: sessionID=%s numObjects=%s",
+		a.tag, a.dbBackupID, a.numObjects)
 
-	allOK := true
+	var (
+		mu    sync.Mutex
+		allOK = true
+		wg    sync.WaitGroup
+		sem   = make(chan struct{}, a.cfg.UploadChannelSize)
+	)
+
 	for _, line := range inputs {
 		if line.Keyword != "#PIPE" && line.Keyword != "#FILE" {
 			if !line.IsSoftwareID && !line.IsToolOption {
-				a.log.Infof("backup: skipping non-object line: %s", line.OriginalLine)
+				a.log.Debugf("%sbackup: skipping non-object line: %s", a.tag, line.OriginalLine)
 			}
 			continue
 		}
-		a.log.Infof("backup: processing %s (maxSize=%d)", line.FileName, line.MaxSize)
 
-		var src io.ReadCloser
-		var openErr error
-		if line.Keyword == "#FILE" {
-			src, openErr = os.Open(line.FileName)
-		} else { // #PIPE
-			src, openErr = os.OpenFile(line.FileName, os.O_RDONLY, os.ModeNamedPipe)
-		}
-		if openErr != nil {
-			a.writeOutput("#ERROR %s", line.FileName)
-			a.log.Errorf("backup: open source %s: %v", line.FileName, openErr)
-			allOK = false
-			continue
-		}
+		sem <- struct{}{} // acquire slot; blocks when pool is full
+		wg.Add(1)
+		go func(line InputLine) {
+			defer wg.Done()
+			defer func() { <-sem }()
 
-		func() {
+			tag := a.fileTag(line.FileName)
+			a.log.Debugf("%sbackup: processing %s (maxSize=%d)", tag, line.FileName, line.MaxSize)
+
+			var src io.ReadCloser
+			var openErr error
+			if line.Keyword == "#FILE" {
+				src, openErr = os.Open(line.FileName)
+			} else { // #PIPE
+				src, openErr = os.OpenFile(line.FileName, os.O_RDONLY, os.ModeNamedPipe)
+			}
+			if openErr != nil {
+				a.writeOutput("#ERROR %s", line.FileName)
+				a.log.Errorf("%sbackup: open source %s: %v", tag, line.FileName, openErr)
+				mu.Lock()
+				allOK = false
+				mu.Unlock()
+				return
+			}
 			defer src.Close()
-			ebid := GenerateEBID()
-			a.log.Infof("backup: generated EBID=%s for %s", ebid, line.FileName)
 
-			bytesUploaded, _, err := a.s3.BackupObject(ctx, line.FileName, src, ebid)
+			ebid := GenerateEBID()
+			a.log.Debugf("%sbackup: generated EBID=%s for %s", tag, ebid, line.FileName)
+
+			bytesUploaded, _, err := a.s3.BackupObject(ctx, line.FileName, src, ebid, tag)
 			if err != nil {
 				a.writeOutput("#ERROR %s", line.FileName)
-				a.log.Errorf("backup: upload %s (EBID %s): %v", line.FileName, ebid, err)
+				a.log.Errorf("%sbackup: upload %s (EBID %s): %v", tag, line.FileName, ebid, err)
+				mu.Lock()
 				allOK = false
+				mu.Unlock()
 				return
 			}
 			a.writeOutput("#SAVED \"%s\" \"%s\" %d", ebid, line.FileName, bytesUploaded)
-		}()
+		}(line)
 	}
+
+	wg.Wait()
 	return allOK, nil
 }
 
 // handleRestore processes all #NULL and #EBID entries from inputs.
 func (a *App) handleRestore(ctx context.Context, inputs []InputLine) error {
-	a.log.Infof("restore start")
-	var firstErr error
+	a.log.Infof("%srestore start", a.tag)
+
+	var (
+		mu       sync.Mutex
+		firstErr error
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, a.cfg.UploadChannelSize)
+	)
 
 	for _, line := range inputs {
 		if line.Keyword != "#NULL" && line.Keyword != "#EBID" {
 			if !line.IsSoftwareID && !line.IsToolOption {
-				a.log.Infof("restore: skipping non-object line: %s", line.OriginalLine)
+				a.log.Debugf("%srestore: skipping non-object line: %s", a.tag, line.OriginalLine)
 			}
 			continue
 		}
@@ -108,68 +158,83 @@ func (a *App) handleRestore(ctx context.Context, inputs []InputLine) error {
 		if hanaPath == "" {
 			msg := fmt.Sprintf("missing filename for restore: %s", line.OriginalLine)
 			a.writeOutput("#ERROR %s", msg)
+			mu.Lock()
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s", msg)
 			}
+			mu.Unlock()
 			continue
 		}
-		a.log.Infof("restore: path=%s ebid=%q", hanaPath, ebid)
 
-		destPath := hanaPath
-		if line.DestinationName != "" {
-			destPath = line.DestinationName
-		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(line InputLine, hanaPath, ebid string) {
+			defer wg.Done()
+			defer func() { <-sem }()
 
-		var dst io.WriteCloser
-		var openErr error
-		fi, statErr := os.Stat(destPath)
-		if statErr == nil && fi.Mode()&os.ModeNamedPipe != 0 {
-			a.log.Infof("restore: opening named pipe for writing: %s", destPath)
-			dst, openErr = os.OpenFile(destPath, os.O_WRONLY, os.ModeNamedPipe)
-		} else {
-			a.log.Infof("restore: creating/opening file for writing: %s", destPath)
-			dst, openErr = os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-		}
-		if openErr != nil {
-			a.writeOutput("#ERROR %s", hanaPath)
-			a.log.Errorf("restore: open destination %s: %v", destPath, openErr)
-			if firstErr == nil {
-				firstErr = openErr
+			tag := a.fileTag(hanaPath)
+			a.log.Debugf("%srestore: path=%s ebid=%q", tag, hanaPath, ebid)
+
+			destPath := hanaPath
+			if line.DestinationName != "" {
+				destPath = line.DestinationName
 			}
-			continue
-		}
 
-		err := func() error {
+			var dst io.WriteCloser
+			var openErr error
+			fi, statErr := os.Stat(destPath)
+			if statErr == nil && fi.Mode()&os.ModeNamedPipe != 0 {
+				a.log.Debugf("%srestore: opening named pipe for writing: %s", tag, destPath)
+				dst, openErr = os.OpenFile(destPath, os.O_WRONLY, os.ModeNamedPipe)
+			} else {
+				a.log.Debugf("%srestore: creating/opening file for writing: %s", tag, destPath)
+				dst, openErr = os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+			}
+			if openErr != nil {
+				a.writeOutput("#ERROR %s", hanaPath)
+				a.log.Errorf("%srestore: open destination %s: %v", tag, destPath, openErr)
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = openErr
+				}
+				mu.Unlock()
+				return
+			}
 			defer dst.Close()
-			_, resolvedEbid, s3Err := a.s3.RestoreObject(ctx, hanaPath, ebid, dst)
+
+			_, resolvedEbid, s3Err := a.s3.RestoreObject(ctx, hanaPath, ebid, dst, tag)
 			if s3Err != nil {
 				if IsNotFound(s3Err) {
 					a.writeOutput("#NOTFOUND %s", hanaPath)
 				} else {
 					a.writeOutput("#ERROR %s", hanaPath)
 				}
-				a.log.Errorf("restore: %s: %v", hanaPath, s3Err)
-				return s3Err
+				a.log.Errorf("%srestore: %s: %v", tag, hanaPath, s3Err)
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = s3Err
+				}
+				mu.Unlock()
+				return
 			}
 			a.writeOutput("#RESTORED \"%s\" \"%s\"", resolvedEbid, hanaPath)
-			return nil
-		}()
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
+		}(line, hanaPath, ebid)
 	}
+
+	wg.Wait()
 	return firstErr
 }
 
 // handleInquire processes inquire requests: global list, per-path list, or specific EBID.
 func (a *App) handleInquire(ctx context.Context, inputs []InputLine) error {
-	a.log.Infof("inquire start")
+	a.log.Infof("%sinquire start", a.tag)
 	var firstErr error
 
 	for _, line := range inputs {
 		hanaPath := line.FileName
 		ebid := line.ExternalBackupID
-		a.log.Infof("inquire: keyword=%s path=%q ebid=%q", line.Keyword, hanaPath, ebid)
+		tag := a.fileTag(hanaPath)
+		a.log.Debugf("%sinquire: keyword=%s path=%q ebid=%q", tag, line.Keyword, hanaPath, ebid)
 
 		switch {
 		case line.Keyword == "#NULL" && hanaPath == "":
@@ -181,7 +246,7 @@ func (a *App) handleInquire(ctx context.Context, inputs []InputLine) error {
 				} else {
 					a.writeOutput("#ERROR could not list objects for global inquire: %v", err)
 				}
-				a.log.Errorf("inquire: global list: %v", err)
+				a.log.Errorf("%sinquire: global list: %v", tag, err)
 				if firstErr == nil {
 					firstErr = err
 				}
@@ -201,7 +266,7 @@ func (a *App) handleInquire(ctx context.Context, inputs []InputLine) error {
 				} else {
 					a.writeOutput("#ERROR %s", hanaPath)
 				}
-				a.log.Errorf("inquire: list versions for %s: %v", hanaPath, err)
+				a.log.Errorf("%sinquire: list versions for %s: %v", tag, hanaPath, err)
 				if firstErr == nil {
 					firstErr = err
 				}
@@ -214,14 +279,14 @@ func (a *App) handleInquire(ctx context.Context, inputs []InputLine) error {
 
 		case line.Keyword == "#EBID" && hanaPath != "" && ebid != "":
 			// Specific version metadata.
-			modTime, err := a.s3.InquireObject(ctx, hanaPath, ebid)
+			modTime, err := a.s3.InquireObject(ctx, hanaPath, ebid, tag)
 			if err != nil {
 				if IsNotFound(err) {
 					a.writeOutput("#NOTFOUND \"%s\" \"%s\"", ebid, hanaPath)
 				} else {
 					a.writeOutput("#ERROR \"%s\" \"%s\"", ebid, hanaPath)
 				}
-				a.log.Errorf("inquire: object %s (EBID %s): %v", hanaPath, ebid, err)
+				a.log.Errorf("%sinquire: object %s (EBID %s): %v", tag, hanaPath, ebid, err)
 				if firstErr == nil {
 					firstErr = err
 				}
@@ -245,13 +310,13 @@ func (a *App) handleInquire(ctx context.Context, inputs []InputLine) error {
 
 // handleDelete processes all #EBID entries from inputs.
 func (a *App) handleDelete(ctx context.Context, inputs []InputLine) error {
-	a.log.Infof("delete start")
+	a.log.Infof("%sdelete start", a.tag)
 	var firstErr error
 
 	for _, line := range inputs {
 		if line.Keyword != "#EBID" {
 			if !line.IsSoftwareID && !line.IsToolOption {
-				a.log.Infof("delete: skipping non-EBID line: %s", line.OriginalLine)
+				a.log.Debugf("%sdelete: skipping non-EBID line: %s", a.tag, line.OriginalLine)
 			}
 			continue
 		}
@@ -267,9 +332,10 @@ func (a *App) handleDelete(ctx context.Context, inputs []InputLine) error {
 			}
 			continue
 		}
-		a.log.Infof("delete: path=%s ebid=%s", hanaPath, ebid)
+		tag := a.fileTag(hanaPath)
+		a.log.Debugf("%sdelete: path=%s ebid=%s", tag, hanaPath, ebid)
 
-		err := a.s3.DeleteObject(ctx, hanaPath, ebid)
+		err := a.s3.DeleteObject(ctx, hanaPath, ebid, tag)
 		if err != nil {
 			if IsNotFound(err) {
 				a.writeOutput("#NOTFOUND \"%s\" \"%s\"", ebid, hanaPath)
@@ -278,7 +344,7 @@ func (a *App) handleDelete(ctx context.Context, inputs []InputLine) error {
 			} else {
 				a.writeOutput("#ERROR \"%s\" \"%s\"", ebid, hanaPath)
 			}
-			a.log.Errorf("delete: %s (EBID %s): %v", hanaPath, ebid, err)
+			a.log.Errorf("%sdelete: %s (EBID %s): %v", tag, hanaPath, ebid, err)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -288,4 +354,3 @@ func (a *App) handleDelete(ctx context.Context, inputs []InputLine) error {
 	}
 	return firstErr
 }
-

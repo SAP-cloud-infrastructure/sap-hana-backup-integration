@@ -12,13 +12,13 @@ import (
 )
 
 // BackintVersion is the Backint API version this tool implements.
-const BackintVersion = "1.50"
+const BackintVersion = "1.50.2"
 
 // SoftwareName is the name of this Backint implementation.
 const SoftwareName = "SCI-hdbbackint-CEPH"
 
 // SoftwareVersion is the version of this Backint implementation.
-const SoftwareVersion = "0.1.0"
+const SoftwareVersion = "1.0.0"
 
 // timestampFormat is the ISO 8601 layout used in Backint protocol output.
 const timestampFormat = "2006-01-02T15:04:05.000Z"
